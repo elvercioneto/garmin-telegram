@@ -1,0 +1,106 @@
+name: Garmin workout analysis
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: garmin-workout-analysis
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Restore Garmin OAuth tokens
+        env:
+          GARMIN_TOKENS_JSON: ${{ secrets.GARMIN_TOKENS_JSON }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("GARMIN_TOKENS_JSON")
+          if not raw:
+              raise SystemExit("O Secret GARMIN_TOKENS_JSON não está configurado.")
+
+          try:
+              token_data = json.loads(raw)
+          except json.JSONDecodeError:
+              raise SystemExit("O Secret GARMIN_TOKENS_JSON não contém JSON válido.")
+
+          token_dir = Path(os.environ["GARMINTOKENS"])
+          token_dir.mkdir(parents=True, exist_ok=True)
+
+          token_file = token_dir / "garmin_tokens.json"
+          token_file.write_text(
+              json.dumps(token_data),
+              encoding="utf-8",
+          )
+          token_file.chmod(0o600)
+          PY
+        env:
+          GARMINTOKENS: ${{ runner.temp }}/garmin-tokens
+
+      - name: Run Garmin analysis
+        env:
+          GARMINTOKENS: ${{ runner.temp }}/garmin-tokens
+          GARMIN_MCP: garmin-mcp
+          GARMIN_STATE_FILE: state/ultima_atividade.txt
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+
+          required = (
+              "GEMINI_API_KEY",
+              "GEMINI_MODEL",
+              "TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_CHAT_ID",
+          )
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit(
+                  "Faltam Secrets ou variável do Actions: " + ", ".join(missing)
+              )
+          PY
+
+          python src/garmin_mcp/analise_garmin.py
+
+      - name: Save activity state
+        run: |
+          git add state/ultima_atividade.txt
+
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Atualiza estado da análise Garmin"
+            git push origin HEAD:main
+          else
+            echo "O estado da atividade não mudou."
+          fi

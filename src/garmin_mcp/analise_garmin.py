@@ -9,14 +9,25 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-GARMIN_MCP = r"C:\Users\Foton\garmin_mcp_server\venv\Scripts\garmin-mcp.exe"
-COOKIES = r"C:\Users\Foton\.garminconnect\cookies.json"
+GARMIN_MCP = os.environ.get("GARMIN_MCP", "garmin-mcp")
+GARMINTOKENS = os.environ.get(
+    "GARMINTOKENS",
+    os.path.expanduser("~/.garminconnect"),
+)
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen2.5:3b"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
+GEMINI_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# O arquivo de estado fica ao lado deste script.
-STATE_FILE = Path(__file__).resolve().parent / "ultima_atividade.txt"
+# Localmente mantém o arquivo ao lado do script. No Actions, o workflow
+# poderá apontar para um arquivo de estado versionado em outra pasta.
+STATE_FILE = Path(
+    os.environ.get(
+        "GARMIN_STATE_FILE",
+        str(Path(__file__).resolve().parent / "ultima_atividade.txt"),
+    )
+)
+
 
 
 def result_text(result):
@@ -343,13 +354,13 @@ async def get_planned_workout_context(session, schemas, target_date):
     return "\n\n".join(context_parts)
 
 
-def analyze_with_ollama(activity_name, activity_details, planned_workout):
-    """Compara a atividade com o treino planejado usando o Ollama."""
+def analyze_with_gemini(activity_name, activity_details, planned_workout):
+    """Compara a atividade com o treino planejado usando a Gemini API."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("A variável GEMINI_API_KEY não foi configurada.")
 
-    # Evita enviar respostas enormes do Garmin, que podem deixar a análise
-    # muito lenta no modelo local.
-    activity_details = str(activity_details)[:10000]
-    planned_workout = str(planned_workout)[:6000]
+    if not GEMINI_MODEL:
+        raise RuntimeError("A variável GEMINI_MODEL não foi configurada.")
 
     prompt = (
         "Compare o treino realizado com o treino planejado para o dia. "
@@ -359,32 +370,44 @@ def analyze_with_ollama(activity_name, activity_details, planned_workout):
         "uma recomendação prática de recuperação. Se faltarem dados, "
         "diga isso claramente.\n\n"
         f"Atividade: {activity_name}\n\n"
-        f"Dados da atividade:\n{activity_details}\n\n"
-        f"Treino planejado:\n{planned_workout}"
+        f"Dados da atividade:\n{str(activity_details)[:10000]}\n\n"
+        f"Treino planejado:\n{str(planned_workout)[:6000]}"
     )
 
     response = requests.post(
-        OLLAMA_URL,
+        f"{GEMINI_URL_BASE}/{GEMINI_MODEL}:generateContent",
+        headers={
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        },
         json={
-            "model": OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "options": {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
                 "temperature": 0.2,
-                "num_predict": 350,
+                "maxOutputTokens": 500,
             },
         },
-        timeout=(10, 900),
+        timeout=(10, 120),
     )
     response.raise_for_status()
 
     data = response.json()
-    analysis = data.get("message", {}).get("content", "").strip()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("A Gemini API não retornou uma análise.")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    analysis = "\n".join(
+        part.get("text", "")
+        for part in parts
+        if part.get("text")
+    ).strip()
 
     if not analysis:
-        raise RuntimeError("O Ollama respondeu, mas não retornou uma análise.")
+        raise RuntimeError("A Gemini API não retornou texto para a análise.")
 
     return analysis
+
 
 
 
@@ -417,110 +440,127 @@ def send_telegram_message(message):
 
 
 async def main():
+    if not os.path.isdir(GARMINTOKENS):
+        raise RuntimeError(
+            f"O diretório de tokens Garmin não existe: {GARMINTOKENS}"
+        )
+
     params = StdioServerParameters(
         command=GARMIN_MCP,
         args=[],
         env={
             **os.environ,
-            "GARMIN_COOKIES_FILE": COOKIES,
+            "GARMINTOKENS": GARMINTOKENS,
         },
     )
 
-    print(f"Monitorando atividades do Garmin. Modelo local: {OLLAMA_MODEL}")
-    print("O programa verifica se há uma atividade nova a cada 5 minutos.")
-    print("Ao detectar uma atividade, consulta o treino planejado para a data dela.")
-    print("Para encerrar, pressione Ctrl+C.")
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            schemas = get_tool_schemas(await session.list_tools())
 
-                tools_result = await session.list_tools()
-                schemas = get_tool_schemas(tools_result)
+            result = await session.call_tool(
+                "get_activities",
+                arguments={},
+            )
+            activities = parse_activities(result_text(result))
 
-                while True:
-                    try:
-                        result = await session.call_tool(
-                            "get_activities",
-                            arguments={},
-                        )
+            if not activities:
+                print("Nenhuma atividade encontrada.")
+                return
 
-                        activities = parse_activities(result_text(result))
+            newest = activities[0]
+            newest_id = get_activity_id(newest)
 
-                        if activities:
-                            newest = activities[0]
-                            activity_id = get_activity_id(newest)
-                            activity_name = get_activity_name(newest)
-                            activity_date = get_activity_date(newest)
+            if not newest_id:
+                raise RuntimeError(
+                    "Não foi possível encontrar o ID da atividade mais recente."
+                )
 
-                            previous_id = (
-                                STATE_FILE.read_text(encoding="utf-8").strip()
-                                if STATE_FILE.exists()
-                                else ""
-                            )
+            previous_id = (
+                STATE_FILE.read_text(encoding="utf-8").strip()
+                if STATE_FILE.exists()
+                else ""
+            )
 
-                            if activity_id and activity_id != previous_id:
-                                print(f"\nAtividade nova: {activity_name}")
-                                print(f"Data usada na comparação: {activity_date}")
-                                print("Buscando detalhes no Garmin Connect...")
+            # Primeira execução: inicia o estado na atividade mais recente,
+            # sem enviar uma análise antiga.
+            if not previous_id:
+                STATE_FILE.write_text(newest_id, encoding="utf-8")
+                print(
+                    "Estado inicial criado na atividade mais recente; "
+                    "nenhuma análise antiga foi enviada."
+                )
+                return
 
-                                details_result = await session.call_tool(
-                                    "get_activity",
-                                    arguments={"activity_id": activity_id},
-                                )
-                                activity_details = result_text(details_result)
+            previous_index = next(
+                (
+                    index
+                    for index, activity in enumerate(activities)
+                    if get_activity_id(activity) == previous_id
+                ),
+                None,
+            )
 
-                                print(
-                                    f"Consultando o treino planejado para "
-                                    f"{activity_date}..."
-                                )
+            # Se o ID salvo não está entre as atividades retornadas, evita
+            # tratar todo o histórico disponível como atividade nova.
+            if previous_index is None:
+                STATE_FILE.write_text(newest_id, encoding="utf-8")
+                print(
+                    "O ID salvo não está na lista atual. "
+                    "Estado reiniciado na atividade mais recente; "
+                    "nenhuma análise foi enviada nesta execução."
+                )
+                return
 
-                                planned_workout = await get_planned_workout_context(
-                                    session,
-                                    schemas,
-                                    activity_date,
-                                )
+            # A lista costuma vir da mais recente para a mais antiga.
+            pending = activities[:previous_index]
 
-                                print("Enviando os dados ao Ollama para análise...")
-                                analysis = await asyncio.to_thread(
-                                    analyze_with_ollama,
-                                    activity_name,
-                                    activity_details,
-                                    planned_workout,
-                                )
+            if not pending:
+                print("Nenhuma atividade nova.")
+                return
 
-                                telegram_message = (
-                                    f"🏃 Análise de: {activity_name}\n"
-                                    f"📅 Data: {activity_date}\n\n"
-                                    f"{analysis}"
-                                )
+            # Processa da mais antiga para a mais recente.
+            for activity in reversed(pending):
+                activity_id = get_activity_id(activity)
+                activity_name = get_activity_name(activity)
+                activity_date = get_activity_date(activity)
 
-                                print("Enviando a análise pelo Telegram...")
-                                await asyncio.to_thread(
-                                    send_telegram_message,
-                                    telegram_message,
-                                )
+                details_result = await session.call_tool(
+                    "get_activity",
+                    arguments={"activity_id": activity_id},
+                )
+                activity_details = result_text(details_result)
 
-                                # Registra a atividade somente depois do envio.
-                                STATE_FILE.write_text(
-                                    activity_id,
-                                    encoding="utf-8",
-                                )
+                planned_workout = await get_planned_workout_context(
+                    session,
+                    schemas,
+                    activity_date,
+                )
 
-                                print("Análise enviada pelo Telegram.")
-                            else:
-                                print("Nenhuma atividade nova.")
-                        else:
-                            print("Nenhuma atividade encontrada.")
+                analysis = await asyncio.to_thread(
+                    analyze_with_gemini,
+                    activity_name,
+                    activity_details,
+                    planned_workout,
+                )
 
-                    except Exception as error:
-                        print(f"Erro nesta consulta: {error}")
+                telegram_message = (
+                    f"🏃 Análise de: {activity_name}\n"
+                    f"📅 Data: {activity_date}\n\n"
+                    f"{analysis}"
+                )
 
-                    await asyncio.sleep(300)
+                await asyncio.to_thread(
+                    send_telegram_message,
+                    telegram_message,
+                )
 
-    except KeyboardInterrupt:
-        print("\nMonitoramento encerrado.")
+                # Avança o estado somente depois do envio confirmado.
+                STATE_FILE.write_text(activity_id, encoding="utf-8")
+                print(f"Análise enviada: {activity_name}")
 
 
 if __name__ == "__main__":
