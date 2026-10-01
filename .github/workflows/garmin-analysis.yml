@@ -33,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
-            - name: Restore Garmin OAuth tokens
+      - name: Restore Garmin OAuth tokens
         env:
           GARMIN_TOKENS_JSON: ${{ secrets.GARMIN_TOKENS_JSON }}
           GARMINTOKENS: ${{ runner.temp }}/garmin-tokens
@@ -59,7 +59,6 @@ jobs:
           token_file.write_text(json.dumps(token_data), encoding="utf-8")
           token_file.chmod(0o600)
           PY
-
 
       - name: Run Garmin analysis
         env:
