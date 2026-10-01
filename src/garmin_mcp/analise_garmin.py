@@ -462,7 +462,6 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
 
     # Repete apenas para erros temporários de limite ou disponibilidade.
         if response.status_code not in (429, 500, 502, 503, 504):
-    
                 break
 
     if attempt < 4:
