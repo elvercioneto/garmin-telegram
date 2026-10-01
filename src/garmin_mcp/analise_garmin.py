@@ -16,7 +16,12 @@ GARMINTOKENS = os.environ.get(
 )
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
+GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "").strip()
+GEMINI_MODEL = GEMINI_MODEL.strip('"').strip("'")
+
+if GEMINI_MODEL.startswith("models/"):
+    GEMINI_MODEL = GEMINI_MODEL.removeprefix("models/")
+
 GEMINI_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 STATE_FILE = Path(
