@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -436,27 +437,42 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         f"Treino planejado:\n{str(planned_workout)[:6000]}"
     )
 
-    response = requests.post(
-        f"{GEMINI_URL_BASE}/{GEMINI_MODEL}:generateContent",
-        headers={
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": 500,
+    for attempt in range(5):
+        response = requests.post(
+            f"{GEMINI_URL_BASE}/{GEMINI_MODEL}:generateContent",
+            headers={
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
             },
-        },
-        timeout=(10, 120),
+            json={
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 500,
+                },
+            },
+            timeout=(10, 120),
     )
+
+    # Repete apenas para erros temporários de limite ou disponibilidade.
+        if response.status_code not in (429, 500, 502, 503, 504):
+    
+                break
+
+    if attempt < 4:
+        delay = min(60, 5 * (2 ** attempt))
+        print(
+            f"Gemini retornou HTTP {response.status_code}; "
+            f"nova tentativa em {delay} segundos."
+        )
+        time.sleep(delay)
+
     if not response.ok:
         try:
             error_data = response.json()
@@ -467,9 +483,10 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         except ValueError:
             error_message = response.text[:1000]
 
-        raise RuntimeError(
-            f"Gemini API retornou HTTP {response.status_code}: {error_message}"
+    raise RuntimeError(
+        f"Gemini API retornou HTTP {response.status_code}: {error_message}"
     )
+
 
 
     data = response.json()
