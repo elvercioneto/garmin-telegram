@@ -55,6 +55,15 @@ def parse_activities(text):
     """Converte a resposta da ferramenta get_activities em uma lista."""
     data = parse_json_or_text(text)
 
+    if isinstance(data, str):
+        if data.startswith("Error"):
+            raise RuntimeError(f"Erro ao consultar atividades Garmin: {data}")
+        if data.startswith("No activities found"):
+            return []
+        raise RuntimeError(
+            f"Resposta inesperada da ferramenta de atividades: {data[:300]}"
+        )
+
     if isinstance(data, list):
         return data
 
@@ -64,7 +73,8 @@ def parse_activities(text):
             if isinstance(value, list):
                 return value
 
-    return []
+    raise RuntimeError("A resposta do Garmin não continha uma lista de atividades.")
+
 
 
 def get_activity_id(activity):
@@ -76,24 +86,18 @@ def get_activity_id(activity):
     return str(value) if value is not None else ""
 
 
-async def fetch_activities_until_state(session, previous_id, max_pages=20):
+async def fetch_activities_until_state(session, previous_id, max_pages=100):
     """
     Busca atividades em páginas de até 100 itens, até encontrar o ID salvo.
 
     Se o ID anterior não aparecer nas páginas consultadas, gera erro e não
     altera o arquivo de estado.
     """
-    page_size = 100
+    page_size = 20
     activities = []
 
     for page in range(max_pages):
-        result = await session.call_tool(
-            "get_activities",
-            arguments={
-                "start": page * page_size,
-                "limit": page_size,
-            },
-        )
+        print(f"Consultando página {page + 1}, início {page * page_size}.")
 
         page_activities = parse_activities(result_text(result))
 
