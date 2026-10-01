@@ -19,15 +19,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
 GEMINI_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# Localmente mantém o arquivo ao lado do script. No Actions, o workflow
-# poderá apontar para um arquivo de estado versionado em outra pasta.
 STATE_FILE = Path(
     os.environ.get(
         "GARMIN_STATE_FILE",
         str(Path(__file__).resolve().parent / "ultima_atividade.txt"),
     )
 )
-
 
 
 def result_text(result):
@@ -79,6 +76,58 @@ def get_activity_id(activity):
     return str(value) if value is not None else ""
 
 
+async def fetch_activities_until_state(session, previous_id, max_pages=20):
+    """
+    Busca atividades em páginas de até 100 itens, até encontrar o ID salvo.
+
+    Se o ID anterior não aparecer nas páginas consultadas, gera erro e não
+    altera o arquivo de estado.
+    """
+    page_size = 100
+    activities = []
+
+    for page in range(max_pages):
+        result = await session.call_tool(
+            "get_activities",
+            arguments={
+                "start": page * page_size,
+                "limit": page_size,
+            },
+        )
+
+        page_activities = parse_activities(result_text(result))
+
+        if not page_activities:
+            break
+
+        activities.extend(page_activities)
+
+        if previous_id and any(
+            get_activity_id(activity) == previous_id
+            for activity in activities
+        ):
+            return activities
+
+        if len(page_activities) < page_size:
+            break
+
+        # Sem estado anterior, a página mais recente basta para inicializar.
+        if not previous_id:
+            return activities
+
+    if previous_id and not any(
+        get_activity_id(activity) == previous_id
+        for activity in activities
+    ):
+        raise RuntimeError(
+            "O ID de estado não foi encontrado nas páginas consultadas. "
+            "O estado foi preservado; nenhuma atividade foi marcada "
+            "como processada."
+        )
+
+    return activities
+
+
 def get_activity_name(activity):
     return (
         activity.get("activityName")
@@ -89,10 +138,7 @@ def get_activity_name(activity):
 
 
 def get_activity_date(activity):
-    """
-    Tenta obter a data em que a atividade foi realizada.
-    Se não encontrar uma data reconhecível, usa a data de hoje.
-    """
+    """Tenta obter a data em que a atividade foi realizada."""
     date_fields = (
         "startTimeLocal",
         "start_time_local",
@@ -110,7 +156,6 @@ def get_activity_date(activity):
         if value is None:
             continue
 
-        # Datas ISO, por exemplo: 2026-09-30 ou 2026-09-30T07:15:00.
         if isinstance(value, str):
             value = value.strip()
 
@@ -126,7 +171,6 @@ def get_activity_date(activity):
             except ValueError:
                 pass
 
-        # Timestamps em segundos ou milissegundos.
         if isinstance(value, (int, float)):
             try:
                 timestamp = value / 1000 if value > 100_000_000_000 else value
@@ -176,12 +220,7 @@ def get_scheduled_items(data):
 
 
 def find_workout_identifier(workout, argument_name):
-    """
-    Localiza o identificador do treino.
-
-    Alguns treinos usam workout_id; treinos de planos Garmin podem usar
-    workout_uuid. As duas formas são consideradas.
-    """
+    """Localiza o identificador do treino planejado."""
     aliases = {
         "workout_id": (
             "workout_id",
@@ -231,7 +270,7 @@ def find_workout_identifier(workout, argument_name):
 
 
 async def get_workout_details(session, schemas, workout):
-    """Busca os detalhes de um treino planejado, se houver identificador."""
+    """Busca detalhes de um treino planejado, se houver identificador."""
     schema = schemas.get("get_workout_by_id")
 
     if not schema:
@@ -239,8 +278,6 @@ async def get_workout_details(session, schemas, workout):
 
     properties = schema.get("properties", {})
     required = schema.get("required", [])
-
-    # Usa os argumentos obrigatórios definidos pelo servidor.
     argument_names = required or list(properties.keys())
 
     arguments = {}
@@ -263,12 +300,12 @@ async def get_workout_details(session, schemas, workout):
         )
         return result_text(result)
     except Exception as error:
-        print(f"Não foi possível buscar os detalhes do treino planejado: {error}")
+        print(f"Não foi possível buscar detalhes do treino planejado: {error}")
         return None
 
 
 async def append_workout_details(session, schemas, data, context_parts, label):
-    """Acrescenta detalhes de até três treinos encontrados numa resposta."""
+    """Acrescenta detalhes de até três treinos encontrados na resposta."""
     items = get_scheduled_items(data)
 
     for workout in items[:3]:
@@ -282,13 +319,9 @@ async def append_workout_details(session, schemas, data, context_parts, label):
 
 
 async def get_planned_workout_context(session, schemas, target_date):
-    """
-    Consulta os treinos agendados para a data da atividade e, se possível,
-    busca os detalhes dos treinos.
-    """
+    """Consulta treinos agendados para a data da atividade."""
     context_parts = []
 
-    # Treinos agendados no calendário do Garmin Connect.
     try:
         scheduled_result = await session.call_tool(
             "get_scheduled_workouts",
@@ -320,7 +353,6 @@ async def get_planned_workout_context(session, schemas, target_date):
             f"{target_date}: {error}"
         )
 
-    # Consulta também o plano de treinamento ativo, se existir.
     try:
         plan_result = await session.call_tool(
             "get_training_plan_workouts",
@@ -355,7 +387,7 @@ async def get_planned_workout_context(session, schemas, target_date):
 
 
 def analyze_with_gemini(activity_name, activity_details, planned_workout):
-    """Compara a atividade com o treino planejado usando a Gemini API."""
+    """Compara a atividade realizada com o treino planejado."""
     if not GEMINI_API_KEY:
         raise RuntimeError("A variável GEMINI_API_KEY não foi configurada.")
 
@@ -381,7 +413,13 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
             "Content-Type": "application/json",
         },
         json={
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
             "generationConfig": {
                 "temperature": 0.2,
                 "maxOutputTokens": 500,
@@ -393,6 +431,7 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
 
     data = response.json()
     candidates = data.get("candidates", [])
+
     if not candidates:
         raise RuntimeError("A Gemini API não retornou uma análise.")
 
@@ -409,8 +448,6 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
     return analysis
 
 
-
-
 def send_telegram_message(message):
     """Envia uma mensagem para o chat configurado no Telegram."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -418,7 +455,7 @@ def send_telegram_message(message):
 
     if not token or not chat_id:
         raise RuntimeError(
-            "Configure as variáveis TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID."
+            "Configure TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID."
         )
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -456,16 +493,27 @@ async def main():
 
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    print("Consultando atividades do Garmin.")
+    print(f"Servidor MCP: {GARMIN_MCP}")
+    print(f"Arquivo de estado: {STATE_FILE}")
+
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            schemas = get_tool_schemas(await session.list_tools())
 
-            result = await session.call_tool(
-                "get_activities",
-                arguments={},
+            tools_result = await session.list_tools()
+            schemas = get_tool_schemas(tools_result)
+
+            previous_id = (
+                STATE_FILE.read_text(encoding="utf-8").strip()
+                if STATE_FILE.exists()
+                else ""
             )
-            activities = parse_activities(result_text(result))
+
+            activities = await fetch_activities_until_state(
+                session,
+                previous_id,
+            )
 
             if not activities:
                 print("Nenhuma atividade encontrada.")
@@ -479,14 +527,8 @@ async def main():
                     "Não foi possível encontrar o ID da atividade mais recente."
                 )
 
-            previous_id = (
-                STATE_FILE.read_text(encoding="utf-8").strip()
-                if STATE_FILE.exists()
-                else ""
-            )
-
-            # Primeira execução: inicia o estado na atividade mais recente,
-            # sem enviar uma análise antiga.
+            # Primeira execução: registra a atividade mais recente como ponto
+            # inicial e não envia análises retroativas.
             if not previous_id:
                 STATE_FILE.write_text(newest_id, encoding="utf-8")
                 print(
@@ -504,29 +546,32 @@ async def main():
                 None,
             )
 
-            # Se o ID salvo não está entre as atividades retornadas, evita
-            # tratar todo o histórico disponível como atividade nova.
             if previous_index is None:
-                STATE_FILE.write_text(newest_id, encoding="utf-8")
-                print(
-                    "O ID salvo não está na lista atual. "
-                    "Estado reiniciado na atividade mais recente; "
-                    "nenhuma análise foi enviada nesta execução."
+                raise RuntimeError(
+                    "O ID salvo não foi encontrado. "
+                    "O estado foi preservado; nenhuma atividade foi "
+                    "marcada como processada."
                 )
-                return
 
-            # A lista costuma vir da mais recente para a mais antiga.
             pending = activities[:previous_index]
 
             if not pending:
                 print("Nenhuma atividade nova.")
                 return
 
-            # Processa da mais antiga para a mais recente.
+            # Processa da atividade nova mais antiga até a mais recente.
             for activity in reversed(pending):
                 activity_id = get_activity_id(activity)
                 activity_name = get_activity_name(activity)
                 activity_date = get_activity_date(activity)
+
+                if not activity_id:
+                    raise RuntimeError(
+                        "Uma atividade retornada pelo Garmin não tem ID."
+                    )
+
+                print(f"Atividade nova: {activity_name}")
+                print(f"Data usada na comparação: {activity_date}")
 
                 details_result = await session.call_tool(
                     "get_activity",
@@ -558,9 +603,9 @@ async def main():
                     telegram_message,
                 )
 
-                # Avança o estado somente depois do envio confirmado.
+                # Atualiza o estado somente após o envio confirmado.
                 STATE_FILE.write_text(activity_id, encoding="utf-8")
-                print(f"Análise enviada: {activity_name}")
+                print(f"Análise enviada pelo Telegram: {activity_name}")
 
 
 if __name__ == "__main__":
