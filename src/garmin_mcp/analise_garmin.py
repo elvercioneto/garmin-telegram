@@ -452,7 +452,20 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         },
         timeout=(10, 120),
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_data = response.json()
+            error_message = error_data.get("error", {}).get(
+                "message",
+                response.text[:1000],
+            )
+        except ValueError:
+            error_message = response.text[:1000]
+
+        raise RuntimeError(
+            f"Gemini API retornou HTTP {response.status_code}: {error_message}"
+    )
+
 
     data = response.json()
     candidates = data.get("candidates", [])
