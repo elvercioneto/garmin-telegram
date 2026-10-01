@@ -15,8 +15,7 @@ GARMINTOKENS = os.environ.get(
     "GARMINTOKENS",
     os.path.expanduser("~/.garminconnect"),
 )
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "").strip()
 GEMINI_MODEL = GEMINI_MODEL.strip('"').strip("'")
 
