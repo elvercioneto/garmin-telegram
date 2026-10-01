@@ -87,17 +87,21 @@ def get_activity_id(activity):
 
 
 async def fetch_activities_until_state(session, previous_id, max_pages=100):
-    """
-    Busca atividades em páginas de até 100 itens, até encontrar o ID salvo.
-
-    Se o ID anterior não aparecer nas páginas consultadas, gera erro e não
-    altera o arquivo de estado.
-    """
+    """Busca atividades paginadas até encontrar o ID salvo."""
     page_size = 20
     activities = []
 
     for page in range(max_pages):
-        print(f"Consultando página {page + 1}, início {page * page_size}.")
+        start = page * page_size
+        print(f"Consultando página {page + 1}, início {start}.")
+
+        result = await session.call_tool(
+            "get_activities",
+            arguments={
+                "start": start,
+                "limit": page_size,
+            },
+        )
 
         page_activities = parse_activities(result_text(result))
 
@@ -115,7 +119,6 @@ async def fetch_activities_until_state(session, previous_id, max_pages=100):
         if len(page_activities) < page_size:
             break
 
-        # Sem estado anterior, a página mais recente basta para inicializar.
         if not previous_id:
             return activities
 
@@ -130,6 +133,7 @@ async def fetch_activities_until_state(session, previous_id, max_pages=100):
         )
 
     return activities
+
 
 
 def get_activity_name(activity):
