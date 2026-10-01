@@ -90,6 +90,7 @@ async def fetch_activities_until_state(session, previous_id, max_pages=100):
     """Busca atividades paginadas até encontrar o ID salvo."""
     page_size = 20
     activities = []
+    seen_pages = set()
 
     for page in range(max_pages):
         start = page * page_size
@@ -106,17 +107,32 @@ async def fetch_activities_until_state(session, previous_id, max_pages=100):
         page_activities = parse_activities(result_text(result))
 
         if not page_activities:
+            print(f"Página {page + 1}: nenhuma atividade retornada.")
             break
 
+        page_ids = tuple(get_activity_id(item) for item in page_activities)
+        print(
+            f"Página {page + 1}: {len(page_activities)} atividades; "
+            f"ID salvo presente: {previous_id in page_ids if previous_id else 'não aplicável'}."
+        )
+
+        if page_ids in seen_pages:
+            raise RuntimeError(
+                f"A paginação repetiu os resultados da página {page + 1}. "
+                "O estado foi preservado."
+            )
+
+        seen_pages.add(page_ids)
         activities.extend(page_activities)
 
-        if previous_id and any(
-            get_activity_id(activity) == previous_id
-            for activity in activities
-        ):
+        if previous_id and previous_id in page_ids:
             return activities
 
         if len(page_activities) < page_size:
+            print(
+                f"Página {page + 1} retornou menos de {page_size} atividades; "
+                "fim da lista."
+            )
             break
 
         if not previous_id:
@@ -133,6 +149,7 @@ async def fetch_activities_until_state(session, previous_id, max_pages=100):
         )
 
     return activities
+
 
 
 
