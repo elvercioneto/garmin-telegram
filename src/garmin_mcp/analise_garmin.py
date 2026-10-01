@@ -436,6 +436,8 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         f"Treino planejado:\n{str(planned_workout)[:6000]}"
     )
 
+    retryable_statuses = {429, 500, 502, 503, 504}
+
     for attempt in range(5):
         response = requests.post(
             f"{GEMINI_URL_BASE}/{GEMINI_MODEL}:generateContent",
@@ -457,19 +459,20 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
                 },
             },
             timeout=(10, 120),
-    )
-
-    # Repete apenas para erros temporários de limite ou disponibilidade.
-        if response.status_code not in (429, 500, 502, 503, 504):
-                break
-
-    if attempt < 4:
-        delay = min(60, 5 * (2 ** attempt))
-        print(
-            f"Gemini retornou HTTP {response.status_code}; "
-            f"nova tentativa em {delay} segundos."
         )
-        time.sleep(delay)
+
+        # Só repete para limite de requisições ou falhas temporárias do servidor.
+        if response.status_code not in retryable_statuses:
+            break
+
+        if attempt < 4:
+            delay = min(60, 5 * (2 ** attempt))
+            print(
+                f"Gemini retornou HTTP {response.status_code}; "
+                f"nova tentativa em {delay} segundos."
+            )
+            time.sleep(delay)
+
 
     if not response.ok:
         try:
@@ -481,11 +484,9 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         except ValueError:
             error_message = response.text[:1000]
 
-    raise RuntimeError(
-        f"Gemini API retornou HTTP {response.status_code}: {error_message}"
-    )
-
-
+        raise RuntimeError(
+            f"Gemini API retornou HTTP {response.status_code}: {error_message}"
+        )
 
     data = response.json()
     candidates = data.get("candidates", [])
@@ -504,6 +505,7 @@ def analyze_with_gemini(activity_name, activity_details, planned_workout):
         raise RuntimeError("A Gemini API não retornou texto para a análise.")
 
     return analysis
+
 
 
 def send_telegram_message(message):
