@@ -1,7 +1,8 @@
 name: Garmin workout analysis
 
-schedule:
-    # Fortaleza (UTC-3): 05:00–08:00, de 30 em 30 minutos
+on:
+  schedule:
+    # Fortaleza (UTC-3): 05:30–08:30, de 30 em 30 minutos
     - cron: "30 8 * * *"
     - cron: "0,30 9-11 * * *"
 
