@@ -1,9 +1,13 @@
 name: Garmin workout analysis
 
-on:
-  schedule:
-    - cron: "0 * * * *"
-  workflow_dispatch:
+schedule:
+    # Fortaleza (UTC-3): 05:00–08:00, de 30 em 30 minutos
+    - cron: "30 8 * * *"
+    - cron: "0,30 9-11 * * *"
+
+    # Fortaleza (UTC-3): 18:00–21:00, de 30 em 30 minutos
+    - cron: "0,30 21-23 * * *"
+    - cron: "0 0 * * *"
 
 permissions:
   contents: write
